@@ -120,6 +120,44 @@ func (hs *clientHandshakeStateTLS13) processDelegatedCredentialFromServer(dc []b
 	return nil
 }
 
+// processDelegatedCredentialFromServer unmarshals the DelegatedCredential
+// offered by the server (if present) and validates it using the peer
+// certificate.
+func (hs *clientHandshakeStateTLS13) processDelegatedCredentialFromServer(dc []byte, certVerifyMsg *certificateVerifyMsg) error {
+	c := hs.c
+
+	var dCred *DelegatedCredential
+	var err error
+	if dc != nil {
+		// Assert that the DC extension was indicated by the client.
+		if !hs.hello.delegatedCredentialSupported {
+			c.sendAlert(alertIllegalParameter)
+			return errors.New("tls: got delegated credential extension without indication")
+		}
+
+		dCred, err = unmarshalDelegatedCredential(dc)
+		if err != nil {
+			c.sendAlert(alertDecodeError)
+			return fmt.Errorf("tls: delegated credential: %s", err)
+		}
+
+		if !isSupportedSignatureAlgorithm(dCred.cred.expCertVerfAlgo, supportedSignatureAlgorithmsDC) {
+			c.sendAlert(alertIllegalParameter)
+			return errors.New("tls: delegated credential used with invalid signature algorithm")
+		}
+	}
+
+	if dCred != nil {
+		if !dCred.Validate(c.peerCertificates[0], DCServer, c.config.time(), certVerifyMsg) {
+			return errors.New("tls: invalid delegated credential")
+		}
+	}
+
+	c.verifiedDC = dCred
+
+	return nil
+}
+
 // handshake requires hs.c, hs.hello, hs.serverHello, hs.ecdheParams, and,
 // optionally, hs.session, hs.earlySecret and hs.binderKey to be set.
 func (hs *clientHandshakeStateTLS13) handshake() error {

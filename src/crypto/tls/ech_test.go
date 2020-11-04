@@ -5,22 +5,17 @@ package tls
 
 import (
 	"crypto/rand"
-	"crypto/tls/internal/hpke"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/cryptobyte"
 )
 
 const (
 	echTestBackendServerName      = "example.com"
 	echTestClientFacingServerName = "cloudflare-esni.com"
-
-	maxConfigIdLen = 255
 )
 
 // The client's root CA certificate.
@@ -118,204 +113,6 @@ EDP7JFNuJX1D43XlVgTajxSy0Y0/Jow5XaTc6rCMIJpzaw9rmN54UnS1ZyyYaNO6
 hY7vtlZo2AAQABAAAQABAAEAAwACAAEAAgADAAAAAA==
 -----END ECH KEYS-----`
 
-// echKeySet implements the ECHProvider interface for a sequence of ECH keys.
-type echKeySet struct {
-	// The serialized ECHConfigs, in order of the server's preference.
-	configs []byte
-
-	// Maps a configuration identifier to its secret key.
-	sk map[[maxConfigIdLen + 1]byte]echKey
-}
-
-// echNewKeySet constructs an echKeySet.
-func echNewKeySet(keys []echKey) (*echKeySet, error) {
-	keySet := new(echKeySet)
-	keySet.sk = make(map[[maxConfigIdLen + 1]byte]echKey)
-	configs := make([]byte, 0)
-	for _, key := range keys {
-		// Compute the set of KDF algorithms supported by this configuration.
-		kdfIds := make(map[uint16]bool)
-		for _, suite := range key.config.suites {
-			kdfIds[suite.kdfId] = true
-		}
-
-		// Compute the configuration identifier for each KDF.
-		for kdfId, _ := range kdfIds {
-			kdf, err := echCreateHpkeKdf(kdfId)
-			if err != nil {
-				return nil, err
-			}
-			configId := kdf.Expand(kdf.Extract(nil, key.config.raw), []byte(echHpkeInfoConfigId), kdf.OutputSize())
-			var b cryptobyte.Builder
-			b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
-				b.AddBytes(configId)
-			})
-			var id [maxConfigIdLen + 1]byte // Initialized to zero
-			copy(id[:], b.BytesOrPanic())
-			keySet.sk[id] = key
-		}
-
-		configs = append(configs, key.config.raw...)
-	}
-
-	var b cryptobyte.Builder
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		b.AddBytes(configs)
-	})
-	keySet.configs = b.BytesOrPanic()
-
-	return keySet, nil
-}
-
-// GetContext is required by the ECHProvider interface.
-func (keySet *echKeySet) GetContext(rawHandle, hrrPsk []byte, version uint16) (res ECHProviderResult) {
-	// Ensure we know how to proceed. Currently only draft-ietf-tls-esni-08 is
-	// supported.
-	if version != extensionECH {
-		res.Status = ECHProviderAbort
-		res.Alert = uint8(alertInternalError)
-		res.Error = errors.New("version not supported")
-		return // Abort
-	}
-
-	// Parse the handle.
-	s := cryptobyte.String(rawHandle)
-	handle := new(echContextHandle)
-	if !echReadContextHandle(&s, handle) || !s.Empty() {
-		res.Status = ECHProviderAbort
-		res.Alert = uint8(alertIllegalParameter)
-		res.Error = errors.New("error parsing context handle")
-		return // Abort
-	}
-	handle.raw = rawHandle
-
-	// Look up the secret key for the configuration indicated by the client.
-	var id [maxConfigIdLen + 1]byte // Initialized to zero
-	var b cryptobyte.Builder
-	b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
-		b.AddBytes(handle.configId)
-	})
-	copy(id[:], b.BytesOrPanic())
-	key, ok := keySet.sk[id]
-	if !ok {
-		res.Status = ECHProviderReject
-		res.RetryConfigs = keySet.configs
-		return // Reject
-	}
-
-	// Ensure that support for the selected ciphersuite is indicated by the
-	// configuration.
-	suite := handle.suite
-	if !key.config.isPeerCipherSuiteSupported(suite) {
-		res.Status = ECHProviderAbort
-		res.Alert = uint8(alertIllegalParameter)
-		res.Error = errors.New("peer cipher suite is not supported")
-		return // Abort
-	}
-
-	// Ensure the version indicated by the client matches the version supported
-	// by the configuration.
-	if version != key.config.version {
-		res.Status = ECHProviderAbort
-		res.Alert = uint8(alertIllegalParameter)
-		res.Error = errors.New("peer version not supported")
-		return // Abort
-	}
-
-	// Compute the decryption context.
-	context, err := key.setupServerContext(handle.enc, hrrPsk, suite)
-	if err != nil {
-		res.Status = ECHProviderAbort
-		res.Alert = uint8(alertInternalError)
-		res.Error = err
-		return // Abort
-	}
-
-	// Serialize the decryption context.
-	res.Context, err = context.marshalServer()
-	if err != nil {
-		res.Status = ECHProviderAbort
-		res.Alert = uint8(alertInternalError)
-		res.Error = err
-		return // Abort
-	}
-
-	res.Status = ECHProviderSuccess
-	// Send retry configs just in case the caller needs to reject.
-	res.RetryConfigs = keySet.configs
-	return // May accept
-}
-
-// echKey represents an ECH key and its corresponding configuration. The
-// encoding of an ECH Key has following structure (in TLS syntax):
-//
-// struct {
-//     opaque private_key<0..2^16-1>
-//     uint16 length<0..2^16-1> // length of config
-//     ECHConfig config;        // as defined in draft-ietf-tls-esni-08
-// } ECHKey;
-//
-// NOTE(cjpatton): This format is not specified in the ECH draft.
-type echKey struct {
-	config ECHConfig
-	sk     hpke.KEMPrivateKey
-}
-
-// echUnmarshalKeys parses a sequence of ECH keys.
-func echUnmarshalKeys(raw []byte) ([]echKey, error) {
-	s := cryptobyte.String(raw)
-	keys := make([]echKey, 0)
-	var key echKey
-	for !s.Empty() {
-		var rawSecretKey, rawConfig cryptobyte.String
-		if !s.ReadUint16LengthPrefixed(&rawSecretKey) ||
-			!s.ReadUint16LengthPrefixed(&rawConfig) {
-			return nil, fmt.Errorf("error parsing key")
-		}
-		config, err := echUnmarshalConfig(rawConfig)
-		if err != nil {
-			if err == echUnrecognizedVersionError {
-				// Skip config with unrecognized version.
-				continue
-			}
-			return nil, err
-		}
-		key.config = *config
-		key.sk, err = echUnmarshalHpkeSecretKey(rawSecretKey, key.config.kemId)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	return keys, nil
-}
-
-// setupServerContext computes the HPKE context used by the server in the ECH
-// extension. If hrrPsk is set, then "SetupPSKR()" is used to generate the
-// context. Otherwise, "SetupBaseR()" is used. (See irtf-cfrg-hpke-05 for
-// details.)
-func (key *echKey) setupServerContext(enc, hrrPsk []byte, suite echCipherSuite) (*echContext, error) {
-	hpkeSuite, err := hpkeAssembleCipherSuite(key.config.kemId, suite.kdfId, suite.aeadId)
-	if err != nil {
-		return nil, err
-	}
-
-	info := append(append([]byte(echHpkeInfoSetup), 0), key.config.raw...)
-	var decryptechContext *hpke.DecryptContext
-	if hrrPsk != nil {
-		decryptechContext, err = hpke.SetupPSKR(hpkeSuite, key.sk, enc, hrrPsk, []byte(echHpkeHrrKeyId), info)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		decryptechContext, err = hpke.SetupBaseR(hpkeSuite, key.sk, enc, info)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return &echContext{nil, decryptechContext, false, hpkeSuite}, nil
-}
-
 // echTestProviderAlwaysAbort mocks an ECHProvider that, in response to any
 // request, sets an alert and returns an error. The client-facing server must
 // abort the handshake.
@@ -345,7 +142,7 @@ func (p echTestProviderAlwaysReject) GetContext(_, _ []byte, _ uint16) (res ECHP
 // client uses the same ECHConfig after a HRR, the server will be unable to
 // process it.
 type echTestProviderRejectAfterHRR struct {
-	keySet      *echKeySet // Used on the first call
+	keySet      *EXP_ECHKeySet // Used on the first call
 	invocations int
 }
 
@@ -374,18 +171,18 @@ func echTestLoadConfigs(pemData string) []ECHConfig {
 	return configs
 }
 
-func echTestLoadKeySet() *echKeySet {
+func echTestLoadKeySet() *EXP_ECHKeySet {
 	block, rest := pem.Decode([]byte(echTestKeys))
 	if block == nil || block.Type != "ECH KEYS" || len(rest) > 0 {
 		panic("pem decoding fails")
 	}
 
-	keys, err := echUnmarshalKeys(block.Bytes)
+	keys, err := EXP_UnmarshalECHKeys(block.Bytes)
 	if err != nil {
 		panic(err)
 	}
 
-	keySet, err := echNewKeySet(keys)
+	keySet, err := EXP_NewECHKeySet(keys)
 	if err != nil {
 		panic(err)
 	}

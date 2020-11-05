@@ -377,12 +377,15 @@ func (c *Conn) echAcceptOrBypass(hello *clientHelloMsg) (*clientHelloMsg, error)
 		return nil, fmt.Errorf("ech: %s", err)
 	}
 
-	var helloOuterAad clientHelloMsg
-	helloOuterAad = *hello
-	helloOuterAad.raw = nil
-	helloOuterAad.encryptedClientHello = nil
-	helloOuterAad.encryptedClientHelloOffered = false
-	rawEncodedHelloInner, err := ctx.open(helloOuterAad.marshal(), ech.payload)
+	helloOuterAad, ok := encodeClientHelloOuterAAD(hello.raw, extensionECH)
+	if !ok {
+		// This occurs if the ClientHelloOuter is malformed. This values was
+		// already parsed into `hello`, so this should not happen.
+		c.sendAlert(alertInternalError)
+		return nil, fmt.Errorf("ech: failed to compute ClientHelloOuterAAD")
+	}
+
+	rawEncodedHelloInner, err := ctx.open(helloOuterAad, ech.payload)
 	if err != nil {
 		if c.hrrTriggered && c.ech.accepted {
 			// Don't reject after accept, as this would result in processing the
@@ -880,6 +883,84 @@ func echIsValidOuterExtension(ext uint16) bool {
 // implements.
 func echIsValidVersion(ext uint16) bool {
 	return ext == extensionECH
+}
+
+// encodeClientHelloOuterAAD interprets data as ClientHelloOuter and maps it to
+// ClientHelloOuterAAD. Returns a bit indicated whether parsing ClientHelloOuter
+// succeeded.
+func encodeClientHelloOuterAAD(data []byte, ext uint16) ([]byte, bool) {
+	var (
+		errReadFailure           = errors.New("read failure")
+		msgType                  uint8
+		legacyVersion            uint16
+		random                   []byte
+		legacySessionId          cryptobyte.String
+		cipherSuites             cryptobyte.String
+		legacyCompressionMethods cryptobyte.String
+		extensions               cryptobyte.String
+		s                        cryptobyte.String
+		b                        cryptobyte.Builder
+	)
+
+	u := cryptobyte.String(data)
+	if !u.ReadUint8(&msgType) ||
+		!u.ReadUint24LengthPrefixed(&s) || !u.Empty() {
+		return nil, false
+	}
+
+	if !s.ReadUint16(&legacyVersion) ||
+		!s.ReadBytes(&random, 32) ||
+		!s.ReadUint8LengthPrefixed(&legacySessionId) ||
+		!s.ReadUint16LengthPrefixed(&cipherSuites) ||
+		!s.ReadUint8LengthPrefixed(&legacyCompressionMethods) {
+		return nil, false
+	}
+
+	if !s.Empty() &&
+		(!s.ReadUint16LengthPrefixed(&extensions) || !s.Empty()) {
+		return nil, false
+	}
+
+	b.AddUint8(msgType)
+	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddUint16(legacyVersion)
+		b.AddBytes(random)
+		b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(legacySessionId)
+		})
+		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(cipherSuites)
+		})
+		b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(legacyCompressionMethods)
+		})
+		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+			for !extensions.Empty() {
+				var ext uint16
+				var extData cryptobyte.String
+				if !extensions.ReadUint16(&ext) ||
+					!extensions.ReadUint16LengthPrefixed(&extData) {
+					panic(cryptobyte.BuildError{Err: errReadFailure})
+				}
+
+				if ext != extensionECH {
+					b.AddUint16(ext)
+					b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+						b.AddBytes(extData)
+					})
+				}
+			}
+		})
+	})
+
+	encodedData, err := b.Bytes()
+	if err == errReadFailure {
+		return nil, false // Reading failed
+	} else if err != nil {
+		panic(err) // Writing failed
+	}
+
+	return encodedData, true
 }
 
 // processClientHelloExtensions interprets data as a ClientHello and applies a

@@ -140,9 +140,11 @@ ZyJKvc2KqjGeZh0Or5pq6ZJb0zR7WPdz5aJIzaZ5YcxLMSv0KwaAEPH2
 var dcTestConfig *Config
 var dcTestCerts map[string]*Certificate
 var serverDC []*dcAndPrivateKey
+var serverKEMDC []*dcAndPrivateKey
 var clientDC []*dcAndPrivateKey
 var dcNow time.Time
-var dcTestDCScheme = []SignatureScheme{ECDSAWithP256AndSHA256, ECDSAWithP384AndSHA384, ECDSAWithP521AndSHA512, Ed25519}
+var dcTestDCScheme = []SignatureScheme{ECDSAWithP256AndSHA256, ECDSAWithP384AndSHA384, ECDSAWithP521AndSHA512, Ed25519, KEMTLSWithSIKEp434, KEMTLSWithKyber512}
+var dcTestDCKEMScheme = []SignatureScheme{KEMTLSWithSIKEp434, KEMTLSWithKyber512}
 
 func init() {
 	dcTestConfig = &Config{
@@ -256,6 +258,13 @@ func initialize() {
 		clientDC = append(clientDC, &dcAndPrivateKey{dc, sk})
 	}
 
+	for i := 0; i < len(dcTestDCKEMScheme); i++ {
+		dc, sk, err := NewDelegatedCredential(dcCertP256, dcTestDCKEMScheme[i], dcNow.Sub(dcCertP256.Leaf.NotBefore)+dcMaxTTL, DCServer)
+		if err != nil {
+			panic(err)
+		}
+		serverKEMDC = append(serverDC, &dcAndPrivateKey{dc, sk})
+	}
 }
 
 func publicKeysEqual(publicKey, publicKey2 crypto.PublicKey, algo SignatureScheme) error {
@@ -636,5 +645,90 @@ func TestDCHandshakeClientAuth(t *testing.T) {
 			}
 		}
 	}
+	inc = 0
+}
+
+var dcKEMTests = []struct {
+	clientDCSupport bool
+	serverDCSupport bool
+	clientMaxVers   uint16
+	serverMaxVers   uint16
+	expectSuccess   bool
+	expectDC        bool
+	name            string
+}{
+	{true, true, VersionTLS13, VersionTLS13, true, true, "tls13: DC server and client support"},
+	//{true, false, VersionTLS13, VersionTLS13, true, false, "DC not server support"},
+	//{false, true, VersionTLS13, VersionTLS13, true, false, "DC not client support"},
+	//{true, true, VersionTLS12, VersionTLS13, true, false, "client using TLS 1.2. No DC is supported in that version."},
+	//{true, true, VersionTLS13, VersionTLS12, true, false, "server using TLS 1.2. No DC is supported in that version."},
+	//{true, true, VersionTLS11, VersionTLS13, true, false, "client using TLS 1.1. No DC is supported in that version."},
+	//{true, true, VersionTLS13, VersionTLS10, false, false, "server using TLS 1.0. No DC is supported in that version."},
+}
+
+// Checks that the client supports the signature algorithm supported by the test
+// server, and that the server has a Delegated Credential.
+func testGetDelegatedCredentialKEM(ch *ClientHelloInfo, cr *CertificateRequestInfo) (*DelegatedCredential, crypto.PrivateKey, error) {
+	if ch != nil {
+		schemeOk := false
+		for _, scheme := range ch.SignatureSchemesDC {
+			schemeOk = schemeOk || (scheme == dcTestDCKEMScheme[inc])
+		}
+
+		if schemeOk && ch.SupportsDelegatedCredential {
+			return serverDC[inc].DelegatedCredential, serverKEMDC[inc].privateKey, nil
+		}
+	} else if cr != nil {
+		// not touched right now
+		schemeOk := false
+		for _, scheme := range cr.SignatureSchemesDC {
+			schemeOk = schemeOk || (scheme == dcTestDCKEMScheme[inc])
+		}
+
+		if schemeOk && cr.SupportsDelegatedCredential {
+			return clientDC[inc].DelegatedCredential, clientDC[inc].privateKey, nil
+		}
+	}
+
+	return nil, nil, nil
+}
+
+// Test the server KEM authentication with the delegated credential extension.
+func TestDCKEMHandshakeServerAuth(t *testing.T) {
+	serverMsg := "hello, client"
+	clientMsg := "hello, server"
+
+	clientConfig := dcTestConfig.Clone()
+	serverConfig := dcTestConfig.Clone()
+	serverConfig.GetCertificate = testServerGetCertificate
+
+	for i, test := range dcKEMTests {
+		clientConfig.SupportDelegatedCredential = test.clientDCSupport
+
+		for inc < len(dcTestDCKEMScheme)-1 {
+			if test.serverDCSupport {
+				serverConfig.GetDelegatedCredential = testGetDelegatedCredential
+				inc++
+			} else {
+				serverConfig.GetDelegatedCredential = nil
+			}
+
+			clientConfig.MaxVersion = test.clientMaxVers
+			serverConfig.MaxVersion = test.serverMaxVers
+
+			usedDC, err := testConnWithDC(t, clientMsg, serverMsg, clientConfig, serverConfig, "client")
+
+			if err != nil && test.expectSuccess {
+				t.Errorf("test #%d (%s) fails: %s", i+1, test.name, err.Error())
+			} else if err == nil && !test.expectSuccess {
+				t.Errorf("test #%d (%s) succeeds; expected failure", i+1, test.name)
+			}
+
+			if usedDC != test.expectDC {
+				t.Errorf("test #%d (%s) usedDC = %v; expected %v", i+1, test.name, usedDC, test.expectDC)
+			}
+		}
+	}
+
 	inc = 0
 }

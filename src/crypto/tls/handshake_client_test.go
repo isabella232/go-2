@@ -527,16 +527,6 @@ func runClientTestTLS13(t *testing.T, template *clientTest) {
 	runClientTestForVersion(t, template, "TLSv13", "-tls1_3")
 }
 
-func TestHandshakeClientRSARC4(t *testing.T) {
-	test := &clientTest{
-		name: "RSA-RC4",
-		args: []string{"-cipher", "RC4-SHA"},
-	}
-	runClientTestTLS10(t, test)
-	runClientTestTLS11(t, test)
-	runClientTestTLS12(t, test)
-}
-
 func TestHandshakeClientRSAAES128GCM(t *testing.T) {
 	test := &clientTest{
 		name: "AES128-GCM-SHA256",

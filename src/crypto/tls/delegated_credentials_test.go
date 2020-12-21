@@ -143,7 +143,7 @@ var serverDC []*dcAndPrivateKey
 var serverKEMDC []*dcAndPrivateKey
 var clientDC []*dcAndPrivateKey
 var dcNow time.Time
-var dcTestDCScheme = []SignatureScheme{ECDSAWithP256AndSHA256, ECDSAWithP384AndSHA384, ECDSAWithP521AndSHA512, Ed25519, KEMTLSWithSIKEp434, KEMTLSWithKyber512}
+var dcTestDCScheme = []SignatureScheme{ECDSAWithP256AndSHA256, ECDSAWithP384AndSHA384, ECDSAWithP521AndSHA512, Ed25519}
 var dcTestDCKEMScheme = []SignatureScheme{KEMTLSWithSIKEp434, KEMTLSWithKyber512}
 
 func init() {
@@ -590,7 +590,9 @@ func TestDCHandshakeServerAuth(t *testing.T) {
 			clientConfig.MaxVersion = test.clientMaxVers
 			serverConfig.MaxVersion = test.serverMaxVers
 
+			fmt.Println("\n FOM HERE")
 			usedDC, err := testConnWithDC(t, clientMsg, serverMsg, clientConfig, serverConfig, "client")
+			fmt.Println("\n TO HERE")
 
 			if err != nil && test.expectSuccess {
 				t.Errorf("test #%d (%s) fails: %s", i+1, test.name, err.Error())

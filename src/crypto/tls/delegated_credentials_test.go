@@ -590,9 +590,7 @@ func TestDCHandshakeServerAuth(t *testing.T) {
 			clientConfig.MaxVersion = test.clientMaxVers
 			serverConfig.MaxVersion = test.serverMaxVers
 
-			fmt.Println("\n FOM HERE")
 			usedDC, err := testConnWithDC(t, clientMsg, serverMsg, clientConfig, serverConfig, "client")
-			fmt.Println("\n TO HERE")
 
 			if err != nil && test.expectSuccess {
 				t.Errorf("test #%d (%s) fails: %s", i+1, test.name, err.Error())

@@ -90,7 +90,7 @@ type serverHandshakeStateTLS13 struct {
 // processDelegatedCredentialFromClient unmarshals the DelegatedCredential
 // offered by the client (if present) and validates it using the peer
 // certificate.
-func (hs *serverHandshakeStateTLS13) processDelegatedCredentialFromClient(dc []byte, certVerifyMsg *certificateVerifyMsg) error {
+func (hs *serverHandshakeStateTLS13) processDelegatedCredentialFromClient(dc []byte, certVerifySigAlgo SignatureScheme) error {
 	c := hs.c
 
 	var dCred *DelegatedCredential
@@ -115,7 +115,7 @@ func (hs *serverHandshakeStateTLS13) processDelegatedCredentialFromClient(dc []b
 	}
 
 	if dCred != nil {
-		if !dCred.Validate(c.peerCertificates[0], DCClient, c.config.time(), certVerifyMsg) {
+		if !dCred.Validate(c.peerCertificates[0], DCClient, c.config.time(), certVerifySigAlgo) {
 			return errors.New("tls: invalid delegated credential")
 		}
 	}
@@ -814,39 +814,41 @@ func (hs *serverHandshakeStateTLS13) sendServerCertificate() error {
 
 	hs.handshakeTimings.WriteCertificate = hs.handshakeTimings.elapsedTime()
 
-	certVerifyMsg := new(certificateVerifyMsg)
-	certVerifyMsg.hasSignatureAlgorithm = true
-	certVerifyMsg.signatureAlgorithm = hs.sigAlg
+	if !hs.isKEMTLS {
+		certVerifyMsg := new(certificateVerifyMsg)
+		certVerifyMsg.hasSignatureAlgorithm = true
+		certVerifyMsg.signatureAlgorithm = hs.sigAlg
 
-	sigType, sigHash, err := typeAndHashFromSignatureScheme(certVerifyMsg.signatureAlgorithm)
-	if err != nil {
-		return c.sendAlert(alertInternalError)
-	}
-
-	signed := signedMessage(sigHash, serverSignatureContext, hs.transcript)
-	signOpts := crypto.SignerOpts(sigHash)
-	if sigType == signatureRSAPSS {
-		signOpts = &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: sigHash}
-	}
-	sig, err := hs.cert.PrivateKey.(crypto.Signer).Sign(c.config.rand(), signed, signOpts)
-	if err != nil {
-		public := hs.cert.PrivateKey.(crypto.Signer).Public()
-		if rsaKey, ok := public.(*rsa.PublicKey); ok && sigType == signatureRSAPSS &&
-			rsaKey.N.BitLen()/8 < sigHash.Size()*2+2 { // key too small for RSA-PSS
-			c.sendAlert(alertHandshakeFailure)
-		} else {
-			c.sendAlert(alertInternalError)
+		sigType, sigHash, err := typeAndHashFromSignatureScheme(certVerifyMsg.signatureAlgorithm)
+		if err != nil {
+			return c.sendAlert(alertInternalError)
 		}
-		return errors.New("tls: failed to sign handshake: " + err.Error())
-	}
-	certVerifyMsg.signature = sig
 
-	hs.transcript.Write(certVerifyMsg.marshal())
-	if _, err := c.writeRecord(recordTypeHandshake, certVerifyMsg.marshal()); err != nil {
-		return err
-	}
+		signed := signedMessage(sigHash, serverSignatureContext, hs.transcript)
+		signOpts := crypto.SignerOpts(sigHash)
+		if sigType == signatureRSAPSS {
+			signOpts = &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: sigHash}
+		}
+		sig, err := hs.cert.PrivateKey.(crypto.Signer).Sign(c.config.rand(), signed, signOpts)
+		if err != nil {
+			public := hs.cert.PrivateKey.(crypto.Signer).Public()
+			if rsaKey, ok := public.(*rsa.PublicKey); ok && sigType == signatureRSAPSS &&
+				rsaKey.N.BitLen()/8 < sigHash.Size()*2+2 { // key too small for RSA-PSS
+				c.sendAlert(alertHandshakeFailure)
+			} else {
+				c.sendAlert(alertInternalError)
+			}
+			return errors.New("tls: failed to sign handshake: " + err.Error())
+		}
+		certVerifyMsg.signature = sig
 
-	hs.handshakeTimings.WriteCertificateVerify = hs.handshakeTimings.elapsedTime()
+		hs.transcript.Write(certVerifyMsg.marshal())
+		if _, err := c.writeRecord(recordTypeHandshake, certVerifyMsg.marshal()); err != nil {
+			return err
+		}
+
+		hs.handshakeTimings.WriteCertificateVerify = hs.handshakeTimings.elapsedTime()
+	}
 
 	return nil
 }
@@ -1031,7 +1033,7 @@ func (hs *serverHandshakeStateTLS13) readClientCertificate() error {
 		}
 
 		if certMsg.delegatedCredential {
-			if err := hs.processDelegatedCredentialFromClient(certMsg.certificate.DelegatedCredential, certVerify); err != nil {
+			if err := hs.processDelegatedCredentialFromClient(certMsg.certificate.DelegatedCredential, certVerify.signatureAlgorithm); err != nil {
 				return err
 			}
 		}

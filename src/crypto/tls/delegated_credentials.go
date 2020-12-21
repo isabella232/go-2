@@ -472,7 +472,7 @@ func NewDelegatedCredential(cert *Certificate, pubAlgo SignatureScheme, validTim
 // Validate validates the delegated credential by checking that the signature is
 // valid, that it hasn't expired, and that the TTL is valid. It also checks that
 // certificate can be used for delegation.
-func (dc *DelegatedCredential) Validate(cert *x509.Certificate, peer DCPeer, now time.Time, certVerifyMsg *certificateVerifyMsg) bool {
+func (dc *DelegatedCredential) Validate(cert *x509.Certificate, peer DCPeer, now time.Time, certVerifySigAlgo SignatureScheme) bool {
 	if dc.isExpired(cert.NotBefore, now) {
 		return false
 	}
@@ -481,8 +481,10 @@ func (dc *DelegatedCredential) Validate(cert *x509.Certificate, peer DCPeer, now
 		return false
 	}
 
-	if dc.cred.expCertVerfAlgo != certVerifyMsg.signatureAlgorithm {
-		return false
+	if !dc.cred.expCertVerfAlgo.isKEMTLS() {
+		if dc.cred.expCertVerfAlgo != certVerifySigAlgo {
+			return false
+		}
 	}
 
 	if !isValidForDelegation(cert) {

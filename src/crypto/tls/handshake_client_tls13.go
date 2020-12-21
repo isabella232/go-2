@@ -87,7 +87,7 @@ type clientHandshakeStateTLS13 struct {
 // processDelegatedCredentialFromServer unmarshals the DelegatedCredential
 // offered by the server (if present) and validates it using the peer
 // certificate.
-func (hs *clientHandshakeStateTLS13) processDelegatedCredentialFromServer(dc []byte, certVerifyMsg *certificateVerifyMsg) error {
+func (hs *clientHandshakeStateTLS13) processDelegatedCredentialFromServer(dc []byte, certVerifySigAlgo SignatureScheme) error {
 	c := hs.c
 
 	var dCred *DelegatedCredential
@@ -112,7 +112,7 @@ func (hs *clientHandshakeStateTLS13) processDelegatedCredentialFromServer(dc []b
 	}
 
 	if dCred != nil {
-		if !dCred.Validate(c.peerCertificates[0], DCServer, c.config.time(), certVerifyMsg) {
+		if !dCred.Validate(c.peerCertificates[0], DCServer, c.config.time(), certVerifySigAlgo) {
 			return errors.New("tls: invalid delegated credential")
 		}
 	}
@@ -601,6 +601,23 @@ func (hs *clientHandshakeStateTLS13) readServerParameters() error {
 	return nil
 }
 
+func isKEMTLSUsed(dc []byte) bool {
+	if dc == nil {
+		return false
+	}
+
+	dCred, err := unmarshalDelegatedCredential(dc)
+	if err != nil {
+		return false
+	}
+
+	if dCred.cred.expCertVerfAlgo.isKEMTLS() {
+		return true
+	}
+
+	return false
+}
+
 func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 	c := hs.c
 
@@ -656,53 +673,59 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		return err
 	}
 
-	msg, err = c.readHandshake()
-	if err != nil {
-		return err
-	}
-
-	certVerify, ok := msg.(*certificateVerifyMsg)
-	if !ok {
-		c.sendAlert(alertUnexpectedMessage)
-		return unexpectedMessageError(certVerify, msg)
-	}
-
-	// See RFC 8446, Section 4.4.3.
-	if !isSupportedSignatureAlgorithm(certVerify.signatureAlgorithm, supportedSignatureAlgorithms) {
-		c.sendAlert(alertIllegalParameter)
-		return errors.New("tls: certificate used with invalid signature algorithm")
-	}
-
-	sigType, sigHash, err := typeAndHashFromSignatureScheme(certVerify.signatureAlgorithm)
-	if err != nil {
-		return c.sendAlert(alertInternalError)
-	}
-	if sigType == signaturePKCS1v15 || sigHash == crypto.SHA1 {
-		c.sendAlert(alertIllegalParameter)
-		return errors.New("tls: certificate used with invalid signature algorithm")
-	}
-
-	if certMsg.delegatedCredential {
-		if err := hs.processDelegatedCredentialFromServer(certMsg.certificate.DelegatedCredential, certVerify); err != nil {
+	if isKEMTLSUsed(certMsg.certificate.DelegatedCredential) {
+		if err := hs.processDelegatedCredentialFromServer(certMsg.certificate.DelegatedCredential, SignatureScheme(0x0000)); err != nil {
 			return err
 		}
+	} else {
+		msg, err = c.readHandshake()
+		if err != nil {
+			return err
+		}
+
+		certVerify, ok := msg.(*certificateVerifyMsg)
+		if !ok {
+			c.sendAlert(alertUnexpectedMessage)
+			return unexpectedMessageError(certVerify, msg)
+		}
+
+		// See RFC 8446, Section 4.4.3.
+		if !isSupportedSignatureAlgorithm(certVerify.signatureAlgorithm, supportedSignatureAlgorithms) {
+			c.sendAlert(alertIllegalParameter)
+			return errors.New("tls: certificate used with invalid signature algorithm")
+		}
+
+		sigType, sigHash, err := typeAndHashFromSignatureScheme(certVerify.signatureAlgorithm)
+		if err != nil {
+			return c.sendAlert(alertInternalError)
+		}
+		if sigType == signaturePKCS1v15 || sigHash == crypto.SHA1 {
+			c.sendAlert(alertIllegalParameter)
+			return errors.New("tls: certificate used with invalid signature algorithm")
+		}
+
+		if certMsg.delegatedCredential {
+			if err := hs.processDelegatedCredentialFromServer(certMsg.certificate.DelegatedCredential, certVerify.signatureAlgorithm); err != nil {
+				return err
+			}
+		}
+
+		pk := c.peerCertificates[0].PublicKey
+		if c.verifiedDC != nil {
+			pk = c.verifiedDC.cred.publicKey
+		}
+
+		signed := signedMessage(sigHash, serverSignatureContext, hs.transcript)
+		if err := verifyHandshakeSignature(sigType, pk,
+			sigHash, signed, certVerify.signature); err != nil {
+			c.sendAlert(alertDecryptError)
+			return errors.New("tls: invalid signature by the server certificate: " + err.Error())
+		}
+
+		hs.transcript.Write(certVerify.marshal())
+
+		hs.handshakeTimings.ReadCertificateVerify = hs.handshakeTimings.elapsedTime()
 	}
-
-	pk := c.peerCertificates[0].PublicKey
-	if c.verifiedDC != nil {
-		pk = c.verifiedDC.cred.publicKey
-	}
-
-	signed := signedMessage(sigHash, serverSignatureContext, hs.transcript)
-	if err := verifyHandshakeSignature(sigType, pk,
-		sigHash, signed, certVerify.signature); err != nil {
-		c.sendAlert(alertDecryptError)
-		return errors.New("tls: invalid signature by the server certificate: " + err.Error())
-	}
-
-	hs.transcript.Write(certVerify.marshal())
-
-	hs.handshakeTimings.ReadCertificateVerify = hs.handshakeTimings.elapsedTime()
 
 	return nil
 }

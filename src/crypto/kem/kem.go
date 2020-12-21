@@ -70,7 +70,7 @@ func GenerateKey(rand io.Reader, kemID ID) (*PublicKey, *PrivateKey, error) {
 		if _, err := io.ReadFull(rand, seed); err != nil {
 			return nil, nil, err
 		}
-		publicKey, privateKey := scheme.DeriveKey(seed)
+		publicKey, privateKey := scheme.DeriveKeyPair(seed)
 		pk, _ := publicKey.MarshalBinary()
 		sk, _ := privateKey.MarshalBinary()
 

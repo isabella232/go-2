@@ -707,7 +707,7 @@ func TestDCKEMHandshakeServerAuth(t *testing.T) {
 
 		for inc < len(dcTestDCKEMScheme)-1 {
 			if test.serverDCSupport {
-				serverConfig.GetDelegatedCredential = testGetDelegatedCredential
+				serverConfig.GetDelegatedCredential = testGetDelegatedCredentialKEM
 				inc++
 			} else {
 				serverConfig.GetDelegatedCredential = nil

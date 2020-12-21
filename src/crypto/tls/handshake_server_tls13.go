@@ -146,6 +146,11 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 		return err
 	}
 	if hs.isKEMTLS {
+		// send application data for KEM TLS
+		if _, err := c.flush(); err != nil {
+			return err
+		}
+
 		return hs.handshakeKEMTLS()
 	}
 	if err := hs.sendServerFinished(); err != nil {

@@ -29,11 +29,12 @@ func (hs *clientHandshakeStateTLS13) handshakeKEMTLS() error {
 	if _, err := c.flush(); err != nil {
 		return err
 	}
-	atomic.StoreUint32(&c.handshakeStatus, 1)
 
 	if err := hs.processKEMTLSServerFinished(); err != nil {
 		return err
 	}
+
+	atomic.StoreUint32(&c.handshakeStatus, 1)
 
 	return nil
 }
@@ -41,6 +42,7 @@ func (hs *clientHandshakeStateTLS13) handshakeKEMTLS() error {
 func (hs *clientHandshakeStateTLS13) sendClientKEMCiphertext() error {
 	c := hs.c
 
+	// TODO: it must be check that this a KEM
 	pk := c.verifiedDC.cred.publicKey.(*kem.PublicKey)
 
 	ss, ct, err := kem.Encapsulate(hs.c.config.Rand, pk)
@@ -92,7 +94,7 @@ func (hs *clientHandshakeStateTLS13) sendKEMTLSClientFinished() error {
 	c := hs.c
 
 	finished := &finishedMsg{
-		verifyData: hs.suite.finishedHashKEMTLS(c.out.trafficSecret, "client", hs.transcript),
+		verifyData: hs.suite.finishedHashKEMTLS(c.out.trafficSecret, "c", hs.transcript),
 	}
 
 	if _, err := hs.transcript.Write(finished.marshal()); err != nil {
@@ -129,7 +131,7 @@ func (hs *clientHandshakeStateTLS13) processKEMTLSServerFinished() error {
 		return unexpectedMessageError(finished, msg)
 	}
 
-	expectedMAC := hs.suite.finishedHashKEMTLS(c.in.trafficSecret, "server", hs.transcript)
+	expectedMAC := hs.suite.finishedHashKEMTLS(c.in.trafficSecret, "s", hs.transcript)
 	if !hmac.Equal(expectedMAC, finished.verifyData) {
 		c.sendAlert(alertDecryptError)
 		return errors.New("tls: invalid server finished hash")

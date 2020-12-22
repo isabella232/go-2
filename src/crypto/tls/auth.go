@@ -213,6 +213,8 @@ func signatureSchemesForCertificate(version uint16, cert *Certificate) []Signatu
 			sigAlgs = []SignatureScheme{KEMTLSWithSIKEp434}
 		} else if kemPriv.KEMId == kem.Kyber512 {
 			sigAlgs = []SignatureScheme{KEMTLSWithKyber512}
+		} else {
+			return nil
 		}
 	} else {
 		priv, ok = cert.PrivateKey.(crypto.Signer)

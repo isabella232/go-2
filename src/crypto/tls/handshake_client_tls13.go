@@ -10,6 +10,7 @@ import (
 	"crypto/hmac"
 	"crypto/kem"
 	"crypto/rsa"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"hash"
@@ -74,6 +75,7 @@ type clientHandshakeStateTLS13 struct {
 	certReq         *certificateRequestMsgTLS13
 	usingPSK        bool
 	sentDummyCCS    bool
+	isKEMTLS        bool
 	suite           *cipherSuiteTLS13
 	transcript      hash.Hash
 	transcriptInner hash.Hash
@@ -200,7 +202,7 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 	if err := hs.readServerCertificate(); err != nil {
 		return err
 	}
-	if c.verifiedDC != nil && c.verifiedDC.cred.expCertVerfAlgo.isKEMTLS() {
+	if hs.isKEMTLS {
 		return hs.handshakeKEMTLS()
 	}
 	if err := hs.readServerFinished(); err != nil {
@@ -347,11 +349,20 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 			c.sendAlert(alertIllegalParameter)
 			return errors.New("tls: server selected unsupported group")
 		}
-		// TODO: this check needs to be in place for both kem and ecdhe
-		//if hs.ecdheParams.CurveID() == curveID {
-		//	c.sendAlert(alertIllegalParameter)
-		//	return errors.New("tls: server sent an unnecessary HelloRetryRequest key_share")
-		//}
+
+		for _, keyShare := range hs.keyShare {
+			if ecdheParams, ok := keyShare.(ecdheParameters); ok {
+				if ecdheParams.CurveID() == curveID {
+					c.sendAlert(alertIllegalParameter)
+					return errors.New("tls: server sent an unnecessary HelloRetryRequest key_share")
+				}
+			} else if kemShare, ok := keyShare.(*kem.PrivateKey); ok {
+				if CurveID(kemShare.KEMId) == curveID {
+					c.sendAlert(alertIllegalParameter)
+					return errors.New("tls: server sent an unnecessary HelloRetryRequest key_share")
+				}
+			}
+		}
 
 		// TODO: refactor
 		if curveID.isKEM() {
@@ -601,18 +612,23 @@ func (hs *clientHandshakeStateTLS13) readServerParameters() error {
 	return nil
 }
 
-func isKEMTLSUsed(dc []byte) bool {
-	if dc == nil {
-		return false
+func isKEMTLSUsed(peerCertificate *x509.Certificate, cert Certificate) bool {
+	if cert.DelegatedCredential != nil {
+		dCred, err := unmarshalDelegatedCredential(cert.DelegatedCredential)
+		if err != nil {
+			return false
+		}
+
+		if dCred.cred.expCertVerfAlgo.isKEMTLS() {
+			return true
+		}
 	}
 
-	dCred, err := unmarshalDelegatedCredential(dc)
-	if err != nil {
-		return false
-	}
-
-	if dCred.cred.expCertVerfAlgo.isKEMTLS() {
-		return true
+	kemPriv, ok := peerCertificate.PublicKey.(*kem.PublicKey)
+	if ok {
+		if kemPriv.KEMId == kem.SIKEp434 || kemPriv.KEMId == kem.Kyber512 {
+			return true
+		}
 	}
 
 	return false
@@ -673,10 +689,13 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		return err
 	}
 
-	if isKEMTLSUsed(certMsg.certificate.DelegatedCredential) {
-		if err := hs.processDelegatedCredentialFromServer(certMsg.certificate.DelegatedCredential, SignatureScheme(0x0000)); err != nil {
-			return err
+	if isKEMTLSUsed(c.peerCertificates[0], certMsg.certificate) {
+		if certMsg.delegatedCredential {
+			if err := hs.processDelegatedCredentialFromServer(certMsg.certificate.DelegatedCredential, SignatureScheme(0x0000)); err != nil {
+				return err
+			}
 		}
+		hs.isKEMTLS = true
 	} else {
 		msg, err = c.readHandshake()
 		if err != nil {

@@ -41,9 +41,22 @@ func (hs *clientHandshakeStateTLS13) handshakeKEMTLS() error {
 
 func (hs *clientHandshakeStateTLS13) sendClientKEMCiphertext() error {
 	c := hs.c
+	var pk *kem.PublicKey
+	var ok bool
 
-	// TODO: it must be check that this a KEM
-	pk := c.verifiedDC.cred.publicKey.(*kem.PublicKey)
+	if c.verifiedDC != nil && c.verifiedDC.cred.expCertVerfAlgo.isKEMTLS() {
+		pk, ok = c.verifiedDC.cred.publicKey.(*kem.PublicKey)
+		if !ok {
+			c.sendAlert(alertInternalError)
+			return errors.New("tls: invalid key")
+		}
+	} else {
+		pk, ok = c.peerCertificates[0].PublicKey.(*kem.PublicKey)
+		if !ok {
+			c.sendAlert(alertInternalError)
+			return errors.New("tls: invalid key")
+		}
+	}
 
 	ss, ct, err := kem.Encapsulate(hs.c.config.Rand, pk)
 	if err != nil {
@@ -63,17 +76,21 @@ func (hs *clientHandshakeStateTLS13) sendClientKEMCiphertext() error {
 		return err
 	}
 
+	// AHS <- HKDF.Extract(dHS, ss_s)
 	ahs := hs.suite.extract(ss, hs.suite.deriveSecret(hs.handshakeSecret, "derived", nil))
 
+	// CAHTS <- HKDF.Expand(AHS, "c ahs traffic", CH..CKC)
 	clientSecret := hs.suite.deriveSecret(ahs,
 		clientAuthenticatedHandshakeTrafficLabel, hs.transcript)
 	c.out.setTrafficSecret(hs.suite, clientSecret)
+	// SAHTS <- HKDF.Expand(AHS, "s ahs traffic", CH..CKC)
 	serverSecret := hs.suite.deriveSecret(ahs,
 		serverAuthenticatedHandshakeTrafficLabel, hs.transcript)
 	c.in.setTrafficSecret(hs.suite, serverSecret)
 
-	hs.masterSecret = hs.suite.extract(nil,
-		hs.suite.deriveSecret(ahs, "derived", nil))
+	// dAHS  <- HKDF.Expand(AHS, "derived", nil)
+	// MS <- HKDF.Extract(dAHS, 0)
+	hs.masterSecret = hs.suite.extract(nil, hs.suite.deriveSecret(ahs, "derived", nil))
 
 	err = c.config.writeKeyLog(keyLogLabelClientAuthenticatedHandshake, hs.hello.random, clientSecret)
 	if err != nil {
@@ -93,6 +110,8 @@ func (hs *clientHandshakeStateTLS13) sendClientKEMCiphertext() error {
 func (hs *clientHandshakeStateTLS13) sendKEMTLSClientFinished() error {
 	c := hs.c
 
+	// fk_c <- HKDF.Expand(MS, "c finished", nil)
+	// CF <- HMAC(fk_c, CH..CKC)
 	finished := &finishedMsg{
 		verifyData: hs.suite.finishedHashKEMTLS(hs.masterSecret, "c", hs.transcript),
 	}
@@ -104,6 +123,7 @@ func (hs *clientHandshakeStateTLS13) sendKEMTLSClientFinished() error {
 		return err
 	}
 
+	// CATS <- HKDF.Expand(MS, "c ap traffic", CH..CF)
 	hs.trafficSecret = hs.suite.deriveSecret(hs.masterSecret,
 		clientApplicationTrafficLabel, hs.transcript)
 
@@ -131,6 +151,7 @@ func (hs *clientHandshakeStateTLS13) processKEMTLSServerFinished() error {
 		return unexpectedMessageError(finished, msg)
 	}
 
+	// HMAC(fk_s , CH..CF)
 	expectedMAC := hs.suite.finishedHashKEMTLS(hs.masterSecret, "s", hs.transcript)
 	if !hmac.Equal(expectedMAC, finished.verifyData) {
 		c.sendAlert(alertDecryptError)
@@ -141,6 +162,7 @@ func (hs *clientHandshakeStateTLS13) processKEMTLSServerFinished() error {
 		return err
 	}
 
+	// SATS <- HKDF.Expand(MS, "s ap traffic", CH..SF)
 	serverSecret := hs.suite.deriveSecret(hs.masterSecret,
 		serverApplicationTrafficLabel, hs.transcript)
 	c.in.setTrafficSecret(hs.suite, serverSecret)

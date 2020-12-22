@@ -94,7 +94,7 @@ func (hs *clientHandshakeStateTLS13) sendKEMTLSClientFinished() error {
 	c := hs.c
 
 	finished := &finishedMsg{
-		verifyData: hs.suite.finishedHashKEMTLS(c.out.trafficSecret, "c", hs.transcript),
+		verifyData: hs.suite.finishedHashKEMTLS(hs.masterSecret, "c", hs.transcript),
 	}
 
 	if _, err := hs.transcript.Write(finished.marshal()); err != nil {
@@ -131,7 +131,7 @@ func (hs *clientHandshakeStateTLS13) processKEMTLSServerFinished() error {
 		return unexpectedMessageError(finished, msg)
 	}
 
-	expectedMAC := hs.suite.finishedHashKEMTLS(c.in.trafficSecret, "s", hs.transcript)
+	expectedMAC := hs.suite.finishedHashKEMTLS(hs.masterSecret, "s", hs.transcript)
 	if !hmac.Equal(expectedMAC, finished.verifyData) {
 		c.sendAlert(alertDecryptError)
 		return errors.New("tls: invalid server finished hash")

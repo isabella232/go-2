@@ -263,7 +263,7 @@ func initialize() {
 		if err != nil {
 			panic(err)
 		}
-		serverKEMDC = append(serverDC, &dcAndPrivateKey{dc, sk})
+		serverKEMDC = append(serverKEMDC, &dcAndPrivateKey{dc, sk})
 	}
 }
 
@@ -676,7 +676,7 @@ func testGetDelegatedCredentialKEM(ch *ClientHelloInfo, cr *CertificateRequestIn
 		}
 
 		if schemeOk && ch.SupportsDelegatedCredential {
-			return serverDC[inc].DelegatedCredential, serverKEMDC[inc].privateKey, nil
+			return serverKEMDC[inc].DelegatedCredential, serverKEMDC[inc].privateKey, nil
 		}
 	} else if cr != nil {
 		// not touched right now

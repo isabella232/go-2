@@ -832,7 +832,7 @@ func (hs *clientHandshakeStateTLS13) sendClientCertificate() error {
 		dCred, priv, err := c.config.GetDelegatedCredential(nil, certificateRequestInfo(hs.certReq))
 		if err != nil {
 			c.sendAlert(alertInternalError)
-			return nil
+			return err
 		}
 
 		if dCred != nil && priv != nil {

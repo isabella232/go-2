@@ -88,6 +88,7 @@ func (hs *clientHandshakeStateTLS13) sendClientKEMCiphertext() error {
 		serverAuthenticatedHandshakeTrafficLabel, hs.transcript)
 	c.in.setTrafficSecret(hs.suite, serverSecret)
 
+	// TODO: change
 	// dAHS  <- HKDF.Expand(AHS, "derived", nil)
 	// MS <- HKDF.Extract(dAHS, 0)
 	hs.masterSecret = hs.suite.extract(nil, hs.suite.deriveSecret(ahs, "derived", nil))
@@ -103,6 +104,113 @@ func (hs *clientHandshakeStateTLS13) sendClientKEMCiphertext() error {
 		c.sendAlert(alertInternalError)
 		return err
 	}
+
+	return nil
+}
+
+func (hs *clientHandshakeStateTLS13) sendKEMClientCertificate() error {
+	c := hs.c
+
+	if hs.certReq == nil {
+		return nil
+	}
+
+	cert, err := c.getClientCertificate(&CertificateRequestInfo{
+		AcceptableCAs:               hs.certReq.certificateAuthorities,
+		SignatureSchemes:            hs.certReq.supportedSignatureAlgorithms,
+		SupportsDelegatedCredential: hs.certReq.supportDelegatedCredential,
+		SignatureSchemesDC:          hs.certReq.supportedSignatureAlgorithmsDC,
+		Version:                     c.vers,
+	})
+	if err != nil {
+		return err
+	}
+
+	if hs.certReq.supportDelegatedCredential && c.config.GetDelegatedCredential != nil {
+		dCred, priv, err := c.config.GetDelegatedCredential(nil, certificateRequestInfo(hs.certReq))
+		if err != nil {
+			c.sendAlert(alertInternalError)
+			return err
+		}
+
+		if dCred != nil && priv != nil {
+			cert.PrivateKey = priv
+			if dCred.raw == nil {
+				dCred.raw, err = dCred.marshal()
+				if err != nil {
+					c.sendAlert(alertInternalError)
+					return err
+				}
+			}
+			cert.DelegatedCredential = dCred.raw
+		}
+	}
+
+	_, ok := cert.PrivateKey.(*kem.PrivateKey)
+	if !ok {
+		// it has to be a KEM key
+		c.sendAlert(alertInternalError)
+		return nil
+	}
+
+	certMsg := new(certificateMsgTLS13)
+
+	certMsg.certificate = *cert
+	certMsg.scts = hs.certReq.scts && len(cert.SignedCertificateTimestamps) > 0
+	certMsg.ocspStapling = hs.certReq.ocspStapling && len(cert.OCSPStaple) > 0
+	certMsg.delegatedCredential = hs.certReq.supportDelegatedCredential && len(cert.DelegatedCredential) > 0
+
+	hs.transcript.Write(certMsg.marshal())
+	if _, err := c.writeRecord(recordTypeHandshake, certMsg.marshal()); err != nil {
+		return err
+	}
+
+	hs.handshakeTimings.WriteCertificate = hs.handshakeTimings.elapsedTime()
+
+	// If we sent an empty certificate message, skip the CertificateVerify.
+	if len(cert.Certificate) == 0 {
+		return nil
+	}
+
+	return nil
+}
+
+func (hs *serverHandshakeStateTLS13) readServerKEMCiphertext() error {
+	c := hs.c
+
+	msg, err := c.readHandshake()
+	if err != nil {
+		return err
+	}
+
+	kexMsg, ok := msg.(*serverKeyExchangeMsg)
+	if !ok {
+		c.sendAlert(alertUnexpectedMessage)
+		return unexpectedMessageError(kexMsg, msg)
+	}
+	hs.transcript.Write(kexMsg.marshal())
+
+	sk, ok := hs.cert.PrivateKey.(*kem.PrivateKey)
+	if !ok {
+		c.sendAlert(alertInternalError)
+		return errors.New("crypto/tls: private key unexpectedly wrong type")
+	}
+
+	ss, err := kem.Decapsulate(sk, kexMsg.key)
+	if err != nil {
+		return err
+	}
+
+	// derive AHS
+	// AHS <- HKDF.Extract(dHS, ss_s)
+	// TODO: change
+	ahs := hs.suite.extract(ss, hs.suite.deriveSecret(hs.handshakeSecret, "derived", nil))
+
+	// compute MS
+	// dAHS <- HKDF.Expand(AHS, "derived", nil)
+	// MS <- HKDF.Extract(dAHS, 0)
+	hs.masterSecret = hs.suite.extract(ss,
+		hs.suite.deriveSecret(ahs, "derived", nil))
 
 	return nil
 }

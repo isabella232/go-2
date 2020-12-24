@@ -68,11 +68,130 @@ func (hs *serverHandshakeStateTLS13) readClientKEMCiphertext() error {
 		serverAuthenticatedHandshakeTrafficLabel, hs.transcript)
 	c.out.setTrafficSecret(hs.suite, serverSecret)
 
+	// TODO: change
 	// compute MS
 	// dAHS <- HKDF.Expand(AHS, "derived", nil)
 	// MS <- HKDF.Extract(dAHS, 0)
 	hs.masterSecret = hs.suite.extract(nil,
 		hs.suite.deriveSecret(ahs, "derived", nil))
+
+	return nil
+}
+
+func (hs *serverHandshakeStateTLS13) readClientKEMCertificate() error {
+	c := hs.c
+
+	if !hs.requestClientCert() {
+		// Make sure the connection is still being verified whether or not
+		// the server requested a client certificate.
+		if c.config.VerifyConnection != nil {
+			if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+				c.sendAlert(alertBadCertificate)
+				return err
+			}
+		}
+		return nil
+	}
+
+	// If we requested a client kem certificate, then the client must send a
+	// kem certificate message.
+
+	msg, err := c.readHandshake()
+	if err != nil {
+		return err
+	}
+
+	certMsg, ok := msg.(*certificateMsgTLS13)
+	if !ok {
+		c.sendAlert(alertUnexpectedMessage)
+		return unexpectedMessageError(certMsg, msg)
+	}
+	hs.transcript.Write(certMsg.marshal())
+
+	if err := c.processCertsFromClient(certMsg.certificate); err != nil {
+		return err
+	}
+
+	if c.config.VerifyConnection != nil {
+		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+			c.sendAlert(alertBadCertificate)
+			return err
+		}
+	}
+
+	hs.handshakeTimings.ReadCertificate = hs.handshakeTimings.elapsedTime()
+
+	if certMsg.delegatedCredential {
+		if err := hs.processDelegatedCredentialFromClient(certMsg.certificate.DelegatedCredential, SignatureScheme(0x0000)); err != nil {
+			return err
+		}
+	}
+
+	pk := c.peerCertificates[0].PublicKey
+	if c.verifiedDC != nil {
+		pk = c.verifiedDC.cred.publicKey
+	}
+
+	_, ok = pk.(*kem.PublicKey)
+	if !ok {
+		// it has to be a KEM key
+		c.sendAlert(alertInternalError)
+		return nil
+	}
+
+	// If we waited until the client certificates to send session tickets, we
+	// are ready to do it now.
+	if err := hs.sendSessionTickets(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (hs *clientHandshakeStateTLS13) sendServerKEMCiphertext() error {
+	c := hs.c
+	var pk *kem.PublicKey
+	var ok bool
+
+	if c.verifiedDC != nil && c.verifiedDC.cred.expCertVerfAlgo.isKEMTLS() {
+		pk, ok = c.verifiedDC.cred.publicKey.(*kem.PublicKey)
+		if !ok {
+			c.sendAlert(alertInternalError)
+			return errors.New("tls: invalid key")
+		}
+	} else {
+		pk, ok = c.peerCertificates[0].PublicKey.(*kem.PublicKey)
+		if !ok {
+			c.sendAlert(alertInternalError)
+			return errors.New("tls: invalid key")
+		}
+	}
+
+	ss, ct, err := kem.Encapsulate(hs.c.config.Rand, pk)
+	if err != nil {
+		return err
+	}
+
+	msg := serverKeyExchangeMsg{
+		key: ct,
+	}
+
+	_, err = c.writeRecord(recordTypeHandshake, msg.marshal())
+	if err != nil {
+		return err
+	}
+	_, err = hs.transcript.Write(msg.marshal())
+	if err != nil {
+		return err
+	}
+
+	// TODO: change
+	// AHS <- HKDF.Extract(dHS, ss_s)
+	ahs := hs.suite.extract(ss, hs.suite.deriveSecret(hs.handshakeSecret, "derived", nil))
+
+	// dAHS  <- HKDF.Expand(AHS, "derived", nil)
+	// MS <- HKDF.Extract(dAHS, 0)
+	hs.masterSecret = hs.suite.extract(ss, hs.suite.deriveSecret(ahs, "derived", nil))
 
 	return nil
 }
